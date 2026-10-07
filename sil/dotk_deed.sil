@@ -1,0 +1,199 @@
+pragma silverscript ^0.1.0;
+
+// The deed of the dotk.name registry is one UTXO per name, with its status, key = blake3(name),
+// owner and plaintext name.
+//
+// DotkGap's `split` creates the deed as PENDING, with claim = blake3(name ‖ ownerType ‖ ownerKey) in
+// the owner field. `activate` reveals the name and makes the deed ACTIVE. The deed exits as seat 1
+// of DotkGap's three-input merge.
+//
+// Every entry of both contracts needs a lineage count of exactly 1 or exactly 3. This covenant
+// authorizes the registry covenant id only onto its own continuation.
+contract DotkDeed(
+    byte[] DEVFUND_SPK,       // version ‖ script, the form that SPK introspection returns
+    int FEE_1CH,
+    int FEE_2CH,
+    int FEE_3CH,
+    int FEE_4CH,
+    int FEE_5PLUS,
+    int BOND,
+    int DEPOSIT,              // refunded at activate, paid to the devfund at evict
+    int T_EVICT,              // relative DAA age after which a PENDING deed can be evicted
+    byte initStatus,
+    byte[32] initKey,
+    byte initOwnerType,       // KCC-2 scheme byte
+    byte[32] initOwner,       // the claim while PENDING
+    byte[32] initName         // zero-padded to 32 bytes
+) {
+    byte status = initStatus;
+    byte[32] key = initKey;
+    byte ownerType = initOwnerType;
+    byte[32] owner = initOwner;
+    byte[32] name = initName;
+
+    byte constant STATUS_PENDING = 0x01;
+    byte constant STATUS_ACTIVE = 0x02;
+    // Every owner scheme maps back to a Kaspa address or is a covenant id. An ECDSA key is 33 bytes,
+    // so 0x85 and 0x86 store its x and keep the y parity in the low bit. They are KCC-2's proposed
+    // 0x05 and 0x06 (kaspanet/kccs#23) with bit 7 set.
+    byte constant TYPE_PUBKEY = 0x00;
+    byte constant TYPE_SCRIPT_HASH = 0x03;
+    byte constant TYPE_COVENANT_ID = 0x04;
+    byte constant TYPE_P2PK_ECDSA_ODD  = 0x85;
+    byte constant TYPE_P2PK_ECDSA_EVEN = 0x86;
+    byte constant SEC1_BASE   = 0x02;
+    byte constant PARITY_MASK = 0x01;
+    byte[32] constant ZERO32 = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+    int constant SIG_LEN = 65;
+    int constant SIGHASH_ALL = 0x01;
+    int constant SIGHASH_ALL_ANYONECANPAY = 0x81;
+    int constant MAX_NAME_LEN = 32;   // the longest name, which also bounds the unrolled loop
+    int constant CH_HYPHEN = 0x2d;
+    int constant CH_0 = 0x30;
+    int constant CH_9 = 0x39;
+    int constant CH_A = 0x61;
+    int constant CH_Z = 0x7a;
+    int constant DEED_SEAT = 1;
+    int constant UPPER_GAP_SEAT = 2;
+
+    // Only ALL and ALL|ANYONECANPAY commit to every output. ANYONECANPAY lets another party fund the
+    // transaction after the owner signs it. A sig is always 65 bytes, so its last byte is the type.
+    function requireSighashAllOutputs(sig s) {
+        byte[] raw = byte[](s);
+        int hashType = unsigned(raw[SIG_LEN - 1]);
+        require(hashType == SIGHASH_ALL || hashType == SIGHASH_ALL_ANYONECANPAY);
+    }
+
+    // The covenant-id arm only checks that an input of the owner covenant is present, so `activate`
+    // and `transfer` never let the registry's own covenant id own a deed. Every arm fixes the length
+    // of `sigs`.
+    function authorize(byte scheme, byte[32] authority, sig[] sigs, int witness) {
+        if (scheme == TYPE_PUBKEY) {
+            require(sigs.length == 1);
+            requireSighashAllOutputs(sigs[0]);
+            require(checkSig(sigs[0], pubkey(authority)));
+        } else if (scheme == TYPE_P2PK_ECDSA_EVEN || scheme == TYPE_P2PK_ECDSA_ODD) {
+            require(sigs.length == 1);
+            byte prefix = SEC1_BASE | (scheme & PARITY_MASK);
+            requireSighashAllOutputs(sigs[0]);
+            require(checkSigEcdsa(sigs[0], byte[33](byte[](prefix) + byte[](authority))));
+        } else if (scheme == TYPE_SCRIPT_HASH) {
+            require(sigs.length == 0);
+            require(witness >= 0 && witness < tx.inputs.length);
+            require(tx.inputs[witness].scriptPubKey == byte[](new ScriptPubKeyP2SH(authority)));
+        } else if (scheme == TYPE_COVENANT_ID) {
+            require(sigs.length == 0);
+            require(OpCovInputCount(authority) > 0);
+        } else {
+            require(false);
+        }
+    }
+
+    // Seat 1 of a merge, which leaves no continuation of the deed.
+    function requireMergeSeat() {
+        require(this.activeInputIndex == DEED_SEAT);
+        byte[32] self = OpInputCovenantId(DEED_SEAT);
+        require(OpCovInputCount(self) == 3);
+        require(OpCovInputIdx(self, 0) == 0);
+        require(OpCovInputIdx(self, 1) == DEED_SEAT);
+        require(OpCovInputIdx(self, 2) == UPPER_GAP_SEAT);
+        require(OpCovOutputCount(self) == 1);
+        require(OpCovOutputIdx(self, 0) == 0);
+    }
+
+    // Reveals the name, makes the deed ACTIVE and pays the devfund the fee for the name's length.
+    entry activate(byte[] name_, byte ownerType_, byte[32] ownerKey) {
+        require(this.activeInputIndex == 0);
+        require(status == STATUS_PENDING);
+        require(ownerKey != ZERO32);
+
+        // Mint admits key-owned schemes only.
+        require(ownerType_ == TYPE_PUBKEY
+             || ownerType_ == TYPE_P2PK_ECDSA_EVEN || ownerType_ == TYPE_P2PK_ECDSA_ODD);
+
+        int nameLen = name_.length;
+        require(nameLen >= 1 && nameLen <= MAX_NAME_LEN);
+        require(blake3(name_) == key);
+        require(blake3(name_ + byte[](ownerType_) + byte[](ownerKey)) == owner);
+
+        // The chain stores only the bare lowercase name. ".k" and letter case are for display.
+        for (i, 0, nameLen, MAX_NAME_LEN) {
+            int c = unsigned(name_[i]);
+            require((c >= CH_A && c <= CH_Z) || (c >= CH_0 && c <= CH_9) || c == CH_HYPHEN);
+        }
+        require(unsigned(name_[0]) != CH_HYPHEN);
+        require(unsigned(name_[nameLen - 1]) != CH_HYPHEN);
+
+        int fee = FEE_5PLUS;
+        if (nameLen == 1) { fee = FEE_1CH; }
+        else if (nameLen == 2) { fee = FEE_2CH; }
+        else if (nameLen == 3) { fee = FEE_3CH; }
+        else if (nameLen == 4) { fee = FEE_4CH; }
+        require(tx.outputs[1].scriptPubKey == DEVFUND_SPK);
+        require(tx.outputs[1].value >= fee);
+
+        // `activate` is the only writer of the name, so every name hashes to its deed's key. The
+        // charset excludes 0x00, so the zero padding is unambiguous.
+        byte[32] storedName = byte[32](name_ + byte[](ZERO32).slice(0, MAX_NAME_LEN - nameLen));
+        byte[32] self = OpInputCovenantId(0);
+        require(OpCovInputCount(self) == 1);
+        require(OpCovOutputCount(self) == 1);
+        require(OpCovOutputIdx(self, 0) == 0);
+        require(tx.outputs[0].value == BOND);
+        validateOutputState(0, State {
+            status: STATUS_ACTIVE,
+            key: key,
+            ownerType: ownerType_,
+            owner: ownerKey,
+            name: storedName
+        });
+    }
+
+    // Moves the deed to a new owner. The key and the name stay.
+    entry transfer(byte newOwnerType, byte[32] newOwner, sig[] sigs, int witness) {
+        require(this.activeInputIndex == 0);
+        require(status == STATUS_ACTIVE);
+
+        byte[32] self = OpInputCovenantId(0);
+        require(OpCovInputCount(self) == 1);
+        authorize(ownerType, owner, sigs, witness);
+
+        require(newOwnerType == TYPE_PUBKEY || newOwnerType == TYPE_SCRIPT_HASH
+             || newOwnerType == TYPE_COVENANT_ID
+             || newOwnerType == TYPE_P2PK_ECDSA_EVEN || newOwnerType == TYPE_P2PK_ECDSA_ODD);
+        require(newOwner != ZERO32);
+        require(newOwner != self);
+        // A covenant-id owner needs no presence check, because a sale escrow is created in the same
+        // transaction.
+
+        require(OpCovOutputCount(self) == 1);
+        require(OpCovOutputIdx(self, 0) == 0);
+        require(tx.outputs[0].value == BOND);
+        validateOutputState(0, State {
+            status: STATUS_ACTIVE,
+            key: key,
+            ownerType: newOwnerType,
+            owner: newOwner,
+            name: name
+        });
+    }
+
+    // Ends the registration with the owner's consent. An escrowed name exits through its owning
+    // covenant.
+    entry release(sig[] sigs, int witness) {
+        require(status == STATUS_ACTIVE);
+        require(ownerType != TYPE_COVENANT_ID);
+        authorize(ownerType, owner, sigs, witness);
+        requireMergeSeat();
+    }
+
+    // Ends a PENDING registration after T_EVICT, by anyone. The DEPOSIT goes to the devfund, and the
+    // builder sets sequence = T_EVICT on this input.
+    entry evict() {
+        require(status == STATUS_PENDING);
+        require(this.ageDaa >= T_EVICT);
+        require(tx.outputs[1].scriptPubKey == DEVFUND_SPK);
+        require(tx.outputs[1].value >= DEPOSIT);
+        requireMergeSeat();
+    }
+}

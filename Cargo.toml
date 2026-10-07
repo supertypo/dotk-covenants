@@ -1,0 +1,34 @@
+[package]
+name = "dotk-covenants"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+description = "Covenant contracts for dotk.name, the .k name registry on Kaspa, with a verifier for the mainnet deployment"
+repository = "https://github.com/supertypo/dotk-covenants"
+authors = ["s@dotk.name"]
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "dotk-verify"
+path = "src/main.rs"
+
+[dependencies]
+# The compiler tag that produced the mainnet deployment, and the rusty-kaspa revision it pins.
+# Covenant bytecode and consensus hashing must agree with both.
+silverscript-lang = { git = "https://github.com/kaspanet/silverscript", tag = "v1.0.0" }
+silverscript-abi = { git = "https://github.com/kaspanet/silverscript", tag = "v1.0.0" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots", "http2", "charset"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1.5"
+faster-hex = "0.9"
+anyhow = "1"
+crossterm = { version = "0.29", default-features = false, features = ["events"] }
