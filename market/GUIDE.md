@@ -8,8 +8,9 @@ serves and sells. A venue is the party that receives the fee of a sale. The escr
   `cfc5bc3f94cb3c8d80b30091adaa126ce159e076e72aa13952ac3bde7de179e4`.
 
 The registry covenants are in [`../registry`](../registry), and
-[supertypo/dotk-core](https://github.com/supertypo/dotk-core) builds their transactions. The escrow compiles with silverscript v1.0.0, and its signature scripts encode
-with `silverscript-abi` at the same tag.
+[supertypo/dotk-core](https://github.com/supertypo/dotk-core) builds their transactions. The
+escrow compiles with silverscript v1.0.0, and its signature scripts encode with
+`silverscript-abi` at the same tag.
 
 ## How a listing works
 
@@ -34,7 +35,7 @@ The escrow pins every value in its state, so no party can change a term after th
 
 | Term | Rule |
 |---|---|
-| Price | What the buyer pays, in sompi. From 2 KAS to 80 000 000 KAS. |
+| Price | What the buyer pays, in sompi. From 2 KAS to 80,000,000 KAS. The dotk market serves no listing above that ceiling. |
 | Fee | Your cut, in sompi. At least 0.2 KAS (`20000000`), and at most the price divided by 10, rounded down. |
 | Window | The DAA score age after which anyone can run `expire`. `0` means that the listing never expires. At most `4294967295`. |
 | Venue | Your key, as a scheme byte and a 32-byte key. |
@@ -141,7 +142,7 @@ template around its state.
 
 | Seat | Content |
 |---|---|
-| Input 1 | Any UTXO at the escrow's address that holds at least the reserve. Entry `buy(buyerSig, buyerType, buyer, deedPrefix, deedSuffix)`. The buyer signs with `SIGHASH_ALL` or `SIGHASH_ALL\|ANYONECANPAY`. Compute budget 64. |
+| Input 1 | Any UTXO at the escrow's address, usually the listing's reserve. The script sets no value for it. Entry `buy(buyerSig, buyerType, buyer, deedPrefix, deedSuffix)`. The buyer signs with `SIGHASH_ALL` or `SIGHASH_ALL\|ANYONECANPAY`. Compute budget 64. |
 | Output 0 | The deed continuation to the buyer, BOND, bound to the registry covenant id. |
 | Output 1 | At least the price less the fee, plus 0.5 KAS, to the seller's P2PK script. |
 | Output 2 | At least the fee, to your P2PK script. |

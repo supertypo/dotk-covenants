@@ -120,6 +120,68 @@ fn a_wrong_node_answer_fails() {
     }
 }
 
+/// Each lie states other terms whole, with every address and hash recomputed from them, so only
+/// the node can refute it.
+#[test]
+fn a_consistent_lie_about_a_term_fails_on_chain() {
+    let base = listing();
+    let lies = [
+        ("price", Listing { price: base.price + 1, ..base.clone() }),
+        ("fee", Listing { fee: base.fee + 1, ..base.clone() }),
+        ("window", Listing { window: base.window + 1, ..base.clone() }),
+        ("no expiry", Listing { window: 0, ..base.clone() }),
+        ("venue", Listing { venue: other().seller, venue_type: other().seller_type, ..base.clone() }),
+        ("seller", Listing { seller: base.venue, seller_type: base.venue_type, ..base.clone() }),
+        ("salt", Listing { salt_txid: [0x79; 32], ..base.clone() }),
+    ];
+    for (what, lie) in lies {
+        lie.check_terms().unwrap();
+        assert!(!proves(&[serve(&lie)], chain(&base)), "a consistent lie about the {what} proved");
+    }
+}
+
+/// Anyone can pay to an escrow's address, so a reserve proves only beside the deed, at output 1
+/// of the transaction whose output 0 is the deed.
+#[test]
+fn a_reserve_of_another_transaction_fails() {
+    let mut s = served();
+    s[0].listed_txid = hex::encode(&[0x5a; 32]);
+    s[0].reserve.txid = s[0].listed_txid.clone();
+    let mut u = utxos();
+    u.push(verify::Utxo { txid: [0x5a; 32], ..u[1].clone() });
+    assert!(!proves(&s, u.clone()), "a reserve paid in another transaction proved");
+    u.push(verify::Utxo { txid: [0x5a; 32], index: 0, ..u[0].clone() });
+    u.remove(0);
+    assert!(proves(&s, u), "the same claim with the deed at that transaction failed");
+}
+
+#[test]
+fn a_deed_at_another_output_fails() {
+    let mut u = utxos();
+    u[0].index = 2;
+    assert!(!proves(&served(), u));
+}
+
+/// A listing with a window and its reserve on chain expires, so the market cannot hide the
+/// reserve and claim that it never does.
+#[test]
+fn a_hidden_reserve_fails() {
+    let mut s = served();
+    s[0].reserve.daa_score = None;
+    s[0].expires_daa_score = None;
+    assert!(!proves(&s, utxos()));
+}
+
+#[test]
+fn a_reserve_older_than_its_deed_fails() {
+    let mut s = served();
+    let mut u = utxos();
+    s[0].reserve.daa_score = Some(RESERVE_DAA - 1);
+    s[0].expires_daa_score = Some(RESERVE_DAA - 1 + s[0].window);
+    u[1].daa_score = RESERVE_DAA - 1;
+    assert!(!proves(&s, u));
+}
+
 /// A listing whose reserve the market does not serve still proves its deed, and it claims no
 /// expiry.
 #[test]
@@ -132,4 +194,13 @@ fn a_listing_without_a_served_reserve_proves_its_deed() {
     assert!(proves(&s, u.clone()));
     u.remove(0);
     assert!(!proves(&s, u));
+}
+
+#[test]
+fn a_lookup_proves_only_the_name_it_asked_for() {
+    let alice = serve(&listing());
+    verify::check_named(&alice, "alice").unwrap();
+    assert!(verify::check_named(&alice, "bob").is_err(), "the listing of alice answered for bob");
+    let relabeled = api::Listing { version: 1, ..alice };
+    assert!(verify::check_named(&relabeled, "alice").is_err(), "a listing of another version answered a lookup");
 }

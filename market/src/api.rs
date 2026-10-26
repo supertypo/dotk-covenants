@@ -61,15 +61,19 @@ async fn get<T: serde::de::DeserializeOwned>(http: &reqwest::Client, url: &str) 
 
 /// Every listing that the market serves, page by page.
 pub async fn listings(http: &reqwest::Client, api: &str) -> Result<Vec<Listing>> {
+    let base = reqwest::Url::parse(&format!("{api}/listings"))?;
     let mut all = Vec::new();
-    let mut url = format!("{api}/listings");
+    let mut seen = std::collections::HashSet::new();
+    let mut url = base.clone();
     loop {
-        let page: Page = get(http, &url).await?.ok_or_else(|| anyhow!("GET {url} answered 404"))?;
+        let page: Page = get(http, url.as_str()).await?.ok_or_else(|| anyhow!("GET {url} answered 404"))?;
         all.extend(page.listings);
-        match page.next {
-            Some(after) => url = format!("{api}/listings?after={after}"),
-            None => return Ok(all),
+        let Some(after) = page.next else { return Ok(all) };
+        if !seen.insert(after.clone()) {
+            return Err(anyhow!("GET {url} names the page after {after} a second time"));
         }
+        url = base.clone();
+        url.query_pairs_mut().append_pair("after", &after);
     }
 }
 

@@ -66,8 +66,10 @@ pub struct Expected {
     pub name: String,
     pub deed: Address,
     pub escrow: Address,
-    /// The reserve's transaction id and DAA score, when the API serves a reserve.
-    pub reserve: Option<([u8; 32], u64)>,
+    /// The listing transaction, whose output 0 is the deed and output 1 the reserve.
+    pub listed_txid: [u8; 32],
+    /// The reserve's DAA score, when the API serves a reserve.
+    pub reserve_daa: Option<u64>,
 }
 
 /// Every claim of one listing that its terms settle, without the node.
@@ -94,8 +96,15 @@ pub fn rebuild(l: &api::Listing, t: &Template, r: &Registry, network: &Network) 
         "the API serves expiry {:?}, but the reserve and the window give {expires:?}",
         l.expires_daa_score
     );
-    let reserve = l.reserve.daa_score.map(|daa| hex::decode32(&l.reserve.txid).map(|txid| (txid, daa))).transpose()?;
-    Ok(Expected { name: l.name.clone(), deed, escrow: escrow_address, reserve })
+    let listed_txid = hex::decode32(&l.listed_txid)?;
+    Ok(Expected { name: l.name.clone(), deed, escrow: escrow_address, listed_txid, reserve_daa: l.reserve.daa_score })
+}
+
+/// The answer to a lookup of `name`: the listing of that name, under this escrow.
+pub fn check_named(l: &api::Listing, name: &str) -> Result<()> {
+    ensure!(l.name == name, "asked for {name}, the market serves the listing of {}", l.name);
+    ensure!(l.version == VERSION, "the market serves a version {} listing of {name}, which this repository does not cover", l.version);
+    Ok(())
 }
 
 /// The listings that this escrow covers, rebuilt, and the count of the others.
@@ -147,21 +156,28 @@ impl Probe {
         self.listings.iter().flat_map(|l| [l.deed.clone(), l.escrow.clone()]).collect()
     }
 
-    /// The listings whose deed or reserve the node does not show.
+    /// The listings whose deed or reserve the node does not show as served.
+    ///
+    /// The deed must sit at output 0 of the served listing transaction, because `expire` takes
+    /// only the reserve beside it. While the escrow holds the deed, no entrypoint has spent that
+    /// reserve, so a reserve that the API leaves out must be absent on chain too.
     pub fn missing(&self, found: &Found, r: &Registry) -> Vec<String> {
         let mut missing = Vec::new();
         for l in &self.listings {
-            let deed = found.get(&l.deed).is_some_and(|us| us.iter().any(|u| u.covenant_id == Some(r.covenant_id)));
-            let reserve = l.reserve.is_none_or(|(txid, daa)| {
-                found.get(&l.escrow).is_some_and(|us| {
-                    us.iter().any(|u| u.txid == txid && u.index == RESERVE_INDEX && u.amount == RESERVE && u.daa_score == daa)
-                })
-            });
-            match (deed, reserve) {
-                (true, true) => {}
-                (false, _) => missing.push(format!("{} (no deed in its escrow)", l.name)),
-                (true, false) => missing.push(format!("{} (no reserve as served)", l.name)),
-            }
+            let deed = found
+                .get(&l.deed)
+                .and_then(|us| us.iter().find(|u| u.covenant_id == Some(r.covenant_id) && u.txid == l.listed_txid && u.index == 0));
+            let reserve = found
+                .get(&l.escrow)
+                .and_then(|us| us.iter().find(|u| u.txid == l.listed_txid && u.index == RESERVE_INDEX && u.amount == RESERVE));
+            let problem = match (deed, reserve, l.reserve_daa) {
+                (None, ..) => "no deed in its escrow at the listing transaction",
+                (Some(_), Some(_), None) => "a reserve that the market does not serve",
+                (Some(_), None, Some(_)) => "no reserve as served",
+                (Some(d), Some(u), Some(daa)) if u.daa_score != daa || d.daa_score != daa => "a reserve of another age",
+                _ => continue,
+            };
+            missing.push(format!("{} ({problem})", l.name));
         }
         missing
     }

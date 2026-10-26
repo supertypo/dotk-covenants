@@ -41,6 +41,13 @@ fn the_artifact_is_the_source_compiled() {
     assert_eq!(ours, published);
 }
 
+/// The guide states the mainnet deed template's lengths.
+#[test]
+fn the_mainnet_deed_template_has_the_lengths_that_the_guide_states() {
+    assert_eq!((REGISTRY.deed.prefix().len(), REGISTRY.deed.suffix().len()), (1, 3116));
+    assert_eq!(hex::encode(&REGISTRY.deed.template_hash()), "238a8d0a5af1ea136d50dd49973487929b8e713a84f1bd1650e97776b9a3f5a0");
+}
+
 #[test]
 fn the_published_template_has_the_pinned_hash() {
     let t = escrow::published().unwrap();

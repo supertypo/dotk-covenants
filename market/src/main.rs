@@ -262,10 +262,14 @@ impl Chain<'_> {
         let market = self.args.market();
         match &self.args.name {
             None => api::listings(self.http, &market).await,
-            Some(name) => match api::listing(self.http, &market, name).await? {
-                Some(listing) => Ok(vec![listing]),
-                None => Err(anyhow::Error::new(Refuted(anyhow!("the market serves no listing of {name}")))),
-            },
+            Some(name) => {
+                let refuted = |e: anyhow::Error| anyhow::Error::new(Refuted(e));
+                let listing = api::listing(self.http, &market, name)
+                    .await?
+                    .ok_or_else(|| refuted(anyhow!("the market serves no listing of {name}")))?;
+                verify::check_named(&listing, name).map_err(refuted)?;
+                Ok(vec![listing])
+            }
         }
     }
 
@@ -324,8 +328,8 @@ fn others(probe: &Probe) -> String {
     }
 }
 
-/// The number of listings proven, or `None` for a failed proof.
-async fn run(args: Args) -> Result<Option<usize>> {
+/// The listings proven, and those of another version, or `None` for a failed proof.
+async fn run(args: Args) -> Result<Option<(usize, usize)>> {
     let ui = Ui { quiet: args.quiet, color: colors_on(std::io::stdout().is_terminal()) };
     let http = reqwest::Client::builder().timeout(Duration::from_secs(120)).build()?;
 
@@ -382,7 +386,9 @@ async fn run(args: Args) -> Result<Option<usize>> {
     ui.announce(&STEPS[3]);
     node = reconnected(&ui, node).await?;
     let on_chain = match chain.read_settled(&node).await {
-        Ok((probe, found)) => probe.check_chain(&found, &registry).map(|detail| (detail, probe.listings.len())),
+        Ok((probe, found)) => {
+            probe.check_chain(&found, &registry).map(|detail| (detail, (probe.listings.len(), probe.other_versions)))
+        }
         Err(e) if e.is::<Refuted>() => Err(e),
         Err(e) => return Err(e),
     };
@@ -410,12 +416,15 @@ async fn main() -> ExitCode {
     let quiet = args.quiet;
     let color = colors_on(std::io::stdout().is_terminal());
     match run(args).await {
-        Ok(Some(proven)) => {
+        Ok(Some((proven, others))) => {
             if !quiet {
-                let result = match proven {
+                let mut result = match proven {
                     0 => "RESULT: PROVEN. The market serves no listing of this escrow, so no listing claims it falsely.".to_string(),
                     n => format!("RESULT: PROVEN. All {n} listings of this escrow run on it, with the terms that the market serves."),
                 };
+                if others > 0 {
+                    result.push_str(&format!(" {others} listings of another escrow version are not proven."));
+                }
                 println!("\n{}", paint(color, Color::Green, &result));
             }
             ExitCode::SUCCESS
