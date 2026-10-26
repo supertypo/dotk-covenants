@@ -47,53 +47,107 @@ The fee comes out of the price. At a buy, the seller receives the price less the
 The script refuses a buy whose fee is outside the bounds. The seller can still cancel such a
 listing, but nobody can buy it, and the dotk market does not show it.
 
-The scheme byte of a schnorr key is `0x00`. An ECDSA key with an even y takes `0x86`, and one
-with an odd y takes `0x85`. An ECDSA key is stored as its 32-byte x.
+## Keys and scheme bytes
+
+The seller and the venue are each a scheme byte and a 32-byte key. The deed stores its owner in
+the same two fields, so the seller is the deed's owner type and owner key, unchanged. Take the
+venue's two values from your Kaspa address:
+
+| Address version | Address payload | Scheme byte | Key |
+|---|---|---|---|
+| `0` (schnorr) | The 32-byte x-only public key | `0x00` | The payload |
+| `1` (ECDSA) | The 33-byte compressed public key, `02` or `03` and then x | `0x86` for `02` (even y), `0x85` for `03` (odd y) | The 32 bytes of x |
+
+Use no other scheme byte. The dotk market refuses a listing under any other scheme byte. An
+address of version `8` is a P2SH address, and it cannot be a seller or a venue.
 
 ## Build the escrow script
 
-The escrow script is the artifact's `bytecode` with its state span replaced. The state span starts
-at byte 1 and is 251 bytes long (`state_span` in the artifact). Write the 13 fields below in this
-order, each one as a data push:
+The compiled escrow is in `sil/dotk_listing.v2.json`, under `contracts.DotkListing.compiled`.
+`bytecode` is the template script as a list of 2401 byte values. `state_span` says where the
+state sits: 251 bytes from offset 1. The escrow script of a listing is byte 0 of the template,
+then the 251 bytes of the listing's state, and then bytes 252 to 2400 of the template. The script
+is always 2401 bytes long.
 
-| # | Field | Push |
+The state is these 13 fields in this order, each one as a data push. An integer is unsigned,
+8 bytes, little-endian.
+
+| # | Field | Value | Push |
+|---|---|---|---|
+| 1 | Seller scheme | The deed's owner type, `0x00`, `0x85` or `0x86` | `0x01` and 1 byte |
+| 2 | Seller key | The deed's owner key | `0x20` and 32 bytes |
+| 3 | Name key | `blake3(name)`, the 32-byte BLAKE3 hash of the name's bytes | `0x20` and 32 bytes |
+| 4 | Price | The price in sompi | `0x08` and the integer |
+| 5 | Window | The window in DAA score, or `0` for never | `0x08` and the integer |
+| 6 | Venue scheme | Your scheme byte | `0x01` and 1 byte |
+| 7 | Venue key | Your key | `0x20` and 32 bytes |
+| 8 | Fee | Your fee in sompi | `0x08` and the integer |
+| 9 | Registry covenant id | From the table below | `0x20` and 32 bytes |
+| 10 | Deed template hash | From the table below | `0x20` and 32 bytes |
+| 11 | Deed prefix length | From the table below | `0x08` and the integer |
+| 12 | Deed suffix length | From the table below | `0x08` and the integer |
+| 13 | Salt | The deed outpoint that the listing transaction spends | `0x24` and 36 bytes |
+
+The name is the bare lowercase name, without `.k`, as the deed holds it. The salt is the 32
+bytes of the outpoint's transaction id, in the order that its hex shows them with no reversal,
+and then the outpoint's index as 4 bytes, little-endian. The index of a deed is always 0.
+Because of the salt, no two listings share an escrow.
+
+Fields 9 to 12 depend on the network. The deed prefix and suffix lengths are the byte lengths of
+the deed template before and after its state.
+
+| Field | Mainnet | Testnet-10 |
 |---|---|---|
-| 1 | Seller scheme | `0x01` and 1 byte |
-| 2 | Seller key | `0x20` and 32 bytes |
-| 3 | Name key, `blake3(name)` | `0x20` and 32 bytes |
-| 4 | Price | `0x08` and 8 bytes, little-endian |
-| 5 | Window | `0x08` and 8 bytes, little-endian |
-| 6 | Venue scheme | `0x01` and 1 byte |
-| 7 | Venue key | `0x20` and 32 bytes |
-| 8 | Fee | `0x08` and 8 bytes, little-endian |
-| 9 | Registry covenant id | `0x20` and 32 bytes |
-| 10 | Deed template hash | `0x20` and 32 bytes |
-| 11 | Deed prefix length | `0x08` and 8 bytes, little-endian |
-| 12 | Deed suffix length | `0x08` and 8 bytes, little-endian |
-| 13 | Salt | `0x24` and 36 bytes |
+| Registry covenant id | `ee2128c03dfac7f6d74734bb3c879bd999434c47a55945b8a6daae2a1e4a21de` | `4a4ca31ea28508021b899610bbc8fbcec4ebd6e6bf4f9c37dca0339fbda1442c` |
+| Deed template hash | `238a8d0a5af1ea136d50dd49973487929b8e713a84f1bd1650e97776b9a3f5a0` | `aaf7b98861ad13f70064e79521c86dccc388b96bd6ce68bf11be76129f518e69` |
+| Deed prefix length | 1 | 1 |
+| Deed suffix length | 3116 | 3116 |
 
-The name is the bare lowercase name, without `.k`. The salt is the outpoint of the deed that the
-listing transaction spends: the 32 bytes of its transaction id, as its hex spells them, and then
-its index as 4 bytes, little-endian. The index of a deed is always 0. Because of the salt, no two
-listings share an escrow.
+The escrow's owner hash is `blake2b-256(script)`, unkeyed, over the whole 2401-byte script. Its
+script public key is `OP_BLAKE2B <hash> OP_EQUAL` (`aa 20 <hash> 87`), and its address is the
+P2SH address of that hash.
 
-On mainnet, fields 9 to 12 are these:
+### Example
 
-| Field | Value |
+This mainnet listing is the one in the test `a_fixed_listing_keeps_its_escrow` in
+`tests/escrow.rs`:
+
+| Term | Value |
 |---|---|
-| Registry covenant id | `ee2128c03dfac7f6d74734bb3c879bd999434c47a55945b8a6daae2a1e4a21de` |
-| Deed template hash | `238a8d0a5af1ea136d50dd49973487929b8e713a84f1bd1650e97776b9a3f5a0` |
-| Deed prefix length | 1 |
-| Deed suffix length | 3116 |
+| Name | `alice` |
+| Seller | `0x00`, `62c0a046dacce86ddd0343c6d3c7c79c2208ba0d9c9cf24a6d046d21d21f90f7` |
+| Price | 25 KAS (`2500000000`) |
+| Window | `864000` |
+| Venue | `0x86`, `989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f` |
+| Fee | 0.5 KAS (`50000000`) |
+| Salt | Transaction id `77` repeated 32 times, index 0 |
 
-To make sure that your encoder is correct, compile the source with silverscript and these 13
-values as constructor arguments. The bytecode must be the same as your script. The test
-`a_fixed_listing_keeps_its_escrow` in `tests/escrow.rs` gives one listing with its owner hash
-and its addresses.
+Its name key is `71b278f3dc434447fc620500e47b6a80b0cb0df76a1051119fe19ed4953242df`, and its
+state is these 251 bytes, one field per line:
 
-The escrow's owner hash is `blake2b-256(script)`. Its script public key is
-`OP_BLAKE2B <hash> OP_EQUAL` (`aa 20 <hash> 87`), and its address is the P2SH address of that
-hash.
+```
+0100
+2062c0a046dacce86ddd0343c6d3c7c79c2208ba0d9c9cf24a6d046d21d21f90f7
+2071b278f3dc434447fc620500e47b6a80b0cb0df76a1051119fe19ed4953242df
+0800f9029500000000
+08002f0d0000000000
+0186
+20989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f
+0880f0fa0200000000
+20ee2128c03dfac7f6d74734bb3c879bd999434c47a55945b8a6daae2a1e4a21de
+20238a8d0a5af1ea136d50dd49973487929b8e713a84f1bd1650e97776b9a3f5a0
+080100000000000000
+082c0c000000000000
+24777777777777777777777777777777777777777777777777777777777777777700000000
+```
+
+The owner hash is `c19d1d3a207f1844c29549b91044dd2fea83752187f9c939b43e1c349911a0f2`. The escrow
+address is `kaspa:prqe68f6ypl3s3xzj4ymjyzym5h74qm4yxrlnjfekslpcdyezxs0y6hne75lv`, and the deed
+address after the listing is `kaspa:pr0rt8znmdk2valc0ka0fuz2hp64kl5ej64memne8t5c5erw67qhzm737j5qc`.
+
+To make sure that your encoder is correct, compile `sil/dotk_listing.v2.sil` with silverscript v1.0.0,
+with the 13 values as constructor arguments. The bytecode must be the same as your script. A Rust
+program can instead call `escrow::escrow` and `escrow::escrow_address` in this crate.
 
 ## Open the listing
 
