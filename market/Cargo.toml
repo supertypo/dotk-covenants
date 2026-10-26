@@ -1,0 +1,32 @@
+[package]
+name = "dotk-listing"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+description = "The sale escrow of the dotk market on Kaspa, with a verifier for the listings that the market serves"
+repository = "https://github.com/supertypo/dotk-covenants"
+authors = ["s@dotk.name"]
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "dotk-listing-verify"
+path = "src/main.rs"
+
+[dependencies]
+# The registry verifier proves the deed template that every listing's escrow state names.
+dotk-registry = { path = "../registry" }
+# The same compiler tag and rusty-kaspa revision as the registry, so both compile and hash alike.
+silverscript-lang = { git = "https://github.com/kaspanet/silverscript", tag = "v1.0.0" }
+silverscript-abi = { git = "https://github.com/kaspanet/silverscript", tag = "v1.0.0" }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots", "http2", "charset"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1.5"
+anyhow = "1"
+crossterm = { version = "0.29", default-features = false, features = ["events"] }

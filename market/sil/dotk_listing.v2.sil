@@ -1,0 +1,190 @@
+pragma silverscript ^0.1.0;
+
+// A sale escrow for one dotk.name listing, on the deed's P2SH owner arm.
+//
+// The deed's owner is blake2b of this script, so the escrow is an ordinary P2SH contract with no
+// covenant id: nothing bounds how many UTXOs sit at its address, and anyone can create one there.
+// The deed arrives by the registry's `transfer` and leaves by `buy`, `cancel` or `expire`, each of
+// which seats the deed at 0 and this escrow at 1. The deed's `release` admits a P2SH owner, so
+// every entrypoint keeps an escrowed name out of an exit merge: each one reads seat 0 as a deed
+// and pins a deed continuation at output 0, and a merge has neither.
+//
+// Everything that varies per listing is a state field, so one template serves every listing on
+// every registry, and a reader rebuilds a listing's script from its published terms.
+contract DotkListing(
+    byte initSellerType,      // KCC-2 scheme of the seller: 0x00, 0x85 or 0x86
+    byte[32] initSeller,      // the seller's key, which cancels and receives every refund
+    byte[32] initKey,         // blake3(name): the name this listing holds
+    int initPrice,            // what the buyer pays, in sompi
+    int initWindow,           // relative DAA age after which anyone returns the name, or 0 for never
+    byte initVenueType,       // scheme of the fee recipient: 0x00, 0x85 or 0x86
+    byte[32] initVenue,       // the fee recipient's key
+    int initFee,              // the fee recipient's cut of the price, in sompi
+    byte[32] initRegistryId,  // the registry's covenant id: what makes a deed a deed
+    byte[32] initDeedHash,    // the deed template's hash
+    int initDeedPrefixLen,
+    int initDeedSuffixLen,
+    byte[36] initSalt         // the deed outpoint that the listing spends, so no two listings share an address
+) {
+    byte sellerType = initSellerType;
+    byte[32] seller = initSeller;
+    byte[32] key = initKey;
+    int price = initPrice;
+    int window = initWindow;
+    byte venueType = initVenueType;
+    byte[32] venue = initVenue;
+    int fee = initFee;
+    byte[32] registryId = initRegistryId;
+    byte[32] deedHash = initDeedHash;
+    int deedPrefixLen = initDeedPrefixLen;
+    int deedSuffixLen = initDeedSuffixLen;
+    byte[36] salt = initSalt;
+
+    // Field order and types match the deed's state declarations.
+    struct DeedState {
+        byte status;
+        byte[32] key;
+        byte ownerType;
+        byte[32] owner;
+        byte[32] name;
+    }
+
+    byte constant STATUS_ACTIVE = 0x02;
+    byte constant TYPE_PUBKEY = 0x00;
+    byte constant TYPE_P2PK_ECDSA_ODD = 0x85;
+    byte constant TYPE_P2PK_ECDSA_EVEN = 0x86;
+    byte constant TYPE_SCRIPT_HASH = 0x03;
+    byte constant SEC1_BASE = 0x02;
+    byte constant PARITY_MASK = 0x01;
+    byte constant OP_BLAKE2B = 0xaa;
+    int constant SIG_LEN = 65;
+    int constant SIGHASH_ALL = 0x01;
+    int constant SIGHASH_ALL_ANYONECANPAY = 0x81;
+    // The bounds of the venue's cut, which a buy takes out of the seller's payout. The floor is
+    // the registry's output floor, and the cap is a tenth of the price.
+    int constant MIN_FEE = 20000000;
+    int constant FEE_CAP_DIVISOR = 10;
+    // What the seller posts on the escrow UTXO. The reserve pays the keeper who runs `expire`, and
+    // it clears the registry's output floor. A buy pins it into the seller's payout. A cancel
+    // leaves it to the seller.
+    int constant RESERVE = 50000000;
+    // The deed takes seat 0, because transfer pins activeInputIndex == 0. With no lineage to
+    // count, the seat pin is also what bounds the escrow to one instance per transaction.
+    int constant DEED_IN = 0;
+    int constant SEAT = 1;
+    // A listing transaction seats the deed at output 0 and the escrow at output 1, so the reserve
+    // of a listed name sits at index 1 of the transaction that created the deed's outpoint.
+    int constant RESERVE_INDEX = 1;
+    // A versioned P2SH scriptPublicKey is 37 bytes: a two-byte version, OP_BLAKE2B, a 32-byte
+    // push of the script hash, OP_EQUAL. The hash is bytes 4..36.
+    int constant HASH_START = 4;
+    int constant HASH_END = 36;
+    // Where a card sits: output 1 of the transaction that creates a deed's outpoint.
+    int constant CARD_INDEX = 1;
+    int constant OPCODE_AT = 2;
+
+    // The deed pins the same rule. A signature under a type that hashes fewer outputs leaves the
+    // rest open to a rewrite, and the outputs are the whole guarantee.
+    function requireSighashAll(sig s) {
+        byte[] raw = byte[](s);
+        int hashType = unsigned(raw[SIG_LEN - 1]);
+        require(hashType == SIGHASH_ALL || hashType == SIGHASH_ALL_ANYONECANPAY);
+    }
+
+    // A key owner's approval, under the two schemes the deed's own arm checks by signature.
+    function requireKey(byte scheme, byte[32] key_, sig s) {
+        requireSighashAll(s);
+        if (scheme == TYPE_PUBKEY) {
+            require(checkSig(s, pubkey(key_)));
+        } else {
+            require(scheme == TYPE_P2PK_ECDSA_EVEN || scheme == TYPE_P2PK_ECDSA_ODD);
+            byte prefix = SEC1_BASE | (scheme & PARITY_MASK);
+            require(checkSigEcdsa(s, byte[33](byte[](prefix) + byte[](key_))));
+        }
+    }
+
+    // The versioned P2PK scriptPublicKey of a key owner, under either scheme.
+    function p2pkSpk(byte scheme, byte[32] key_): byte[] {
+        byte[] spk = byte[](new ScriptPubKeyP2PK(pubkey(key_)));
+        if (scheme != TYPE_PUBKEY) {
+            byte prefix = SEC1_BASE | (scheme & PARITY_MASK);
+            spk = byte[](0x000021) + byte[](prefix) + byte[](key_) + byte[](0xab);
+        }
+        return spk;
+    }
+
+    // The listing's seat, and the deed it holds, returned for its name. Self-identification is
+    // by the hash in this input's own scriptPublicKey, which consensus matches against the
+    // running script. The lineage pin is necessary, because every field the state read yields
+    // is a shape a forger writes, and a decoy at the real deed's address under a lineage of its
+    // own satisfies every other line.
+    function requireHolding(): DeedState {
+        require(this.activeInputIndex == SEAT);
+        byte[] spk = this.activeScriptPubKey;
+        byte[32] self = byte[32](spk.slice(HASH_START, HASH_END));
+        require(OpInputCovenantId(DEED_IN) == registryId);
+        DeedState held = readInputStateWithTemplate(DEED_IN, deedPrefixLen, deedSuffixLen, deedHash);
+        require(held.key == key);
+        require(held.ownerType == TYPE_SCRIPT_HASH);
+        require(held.owner == self);
+        return held;
+    }
+
+    // Where the name goes, pinned here as well as by the deed's own transfer: all five fields.
+    // The name and the value come from the deed itself, so no state field can strand a name.
+    function requireDeedTo(DeedState held, byte ownerType_, byte[32] owner_, byte[] deedPrefix, byte[] deedSuffix) {
+        require(tx.outputs[0].value == tx.inputs[DEED_IN].value);
+        validateOutputStateWithTemplate(0,
+            DeedState { status: STATUS_ACTIVE, key: key, ownerType: ownerType_, owner: owner_, name: held.name },
+            deedPrefix, deedSuffix, deedHash);
+    }
+
+    // No card. A card is any P2SH output at index 1 of the transaction that creates a deed's
+    // outpoint, and whoever builds a cancel or an expire is not the name's next owner.
+    function requireNoCard() {
+        if (tx.outputs.length > CARD_INDEX) {
+            byte[] spk = tx.outputs[CARD_INDEX].scriptPubKey;
+            require(spk[OPCODE_AT] != OP_BLAKE2B);
+        }
+    }
+
+    // Open to anyone. The buyer's identity arrives with a signature this script checks itself,
+    // over a transaction whose output 0 is the continuation to that same buyer.
+    // Outputs: 0 the continuation, 1 the seller's payout, 2 the venue's fee. The buyer pays the
+    // price, and the fee comes out of it, so outputs 1 and 2 together hold at least the price and
+    // the reserve.
+    entry buy(sig buyerSig, byte buyerType, byte[32] buyer, byte[] deedPrefix, byte[] deedSuffix) {
+        DeedState held = requireHolding();
+        requireKey(buyerType, buyer, buyerSig);
+        requireDeedTo(held, buyerType, buyer, deedPrefix, deedSuffix);
+        require(tx.outputs[1].scriptPubKey == p2pkSpk(sellerType, seller));
+        require(fee >= MIN_FEE);
+        require(fee <= price / FEE_CAP_DIVISOR);
+        require(tx.outputs[1].value >= price - fee + RESERVE);
+        require(tx.outputs[2].scriptPubKey == p2pkSpk(venueType, venue));
+        require(tx.outputs[2].value >= fee);
+    }
+
+    // The seller's way out: one signature, and the name goes home. Any UTXO at the address
+    // serves, so a listing whose reserve is lost reopens over a fresh one.
+    entry cancel(sig sellerSig, byte[] deedPrefix, byte[] deedSuffix) {
+        DeedState held = requireHolding();
+        requireKey(sellerType, seller, sellerSig);
+        requireDeedTo(held, sellerType, seller, deedPrefix, deedSuffix);
+        requireNoCard();
+    }
+
+    // Permissionless after the window, and it can only send the name home. Only the listing's
+    // own reserve serves, because any other UTXO at the address keeps its own clock, and one
+    // funded before the listing is older than the listing. A zero window never expires. Every age
+    // reaches a zero window, so the window must be above zero.
+    entry expire(byte[] deedPrefix, byte[] deedSuffix) {
+        require(window > 0);
+        DeedState held = requireHolding();
+        require(OpOutpointTxId(SEAT) == OpOutpointTxId(DEED_IN));
+        require(OpOutpointIndex(SEAT) == RESERVE_INDEX);
+        require(this.ageDaa >= window);
+        requireDeedTo(held, sellerType, seller, deedPrefix, deedSuffix);
+        requireNoCard();
+    }
+}
