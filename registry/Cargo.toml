@@ -1,9 +1,9 @@
 [package]
-name = "dotk-covenants"
+name = "dotk-registry"
 version = "1.0.0"
 edition = "2024"
 license = "MIT"
-description = "Covenant contracts for dotk.name, the .k name registry on Kaspa, with a verifier for the mainnet deployment"
+description = "The registry covenant contracts of dotk.name, the .k name registry on Kaspa, with a verifier for the mainnet deployment"
 repository = "https://github.com/supertypo/dotk-covenants"
 authors = ["s@dotk.name"]
 publish = false

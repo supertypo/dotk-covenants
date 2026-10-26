@@ -1351,7 +1351,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotk-covenants"
+name = "dotk-registry"
 version = "1.0.0"
 dependencies = [
  "anyhow",

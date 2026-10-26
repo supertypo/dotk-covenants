@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use crossterm::style::{Color, Stylize};
-use dotk_covenants::api;
-use dotk_covenants::compile::Templates;
-use dotk_covenants::verify::{self, Probe};
+use dotk_registry::api;
+use dotk_registry::compile::Templates;
+use dotk_registry::verify::{self, Probe};
 use kaspa_addresses::Address;
 use kaspa_rpc_core::RpcHash;
 use node::Node;
@@ -304,7 +304,7 @@ async fn run(args: Args) -> Result<bool> {
     let ui = Ui { quiet: args.quiet, color: colors_on(std::io::stdout().is_terminal()) };
     let http = reqwest::Client::builder().timeout(Duration::from_secs(120)).build()?;
 
-    ui.info("dotk-covenants verifier: proves that the dotk.name registry on Kaspa mainnet is produced");
+    ui.info("dotk.name registry verifier: proves that the dotk.name registry on Kaspa mainnet is produced");
     ui.info("by the contracts in sil/ and the registry's parameters.\n");
     ui.info(&format!("Reading the deployment manifest from {}/genesis", args.api));
     let manifest = api::manifest(&http, &args.api).await?;

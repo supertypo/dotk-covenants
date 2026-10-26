@@ -77,9 +77,8 @@ impl Node {
         let mut found = HashSet::new();
         for chunk in addresses.chunks(CHUNK) {
             let entries = self.utxos(chunk).await?;
-            let held =
-                dotk_covenants::verify::holding(entries.into_iter().map(|e| (e.address, e.utxo_entry.covenant_id)), covenant_id)
-                    .map_err(|e| e.context(format!("the node at {}", self.url)))?;
+            let held = dotk_registry::verify::holding(entries.into_iter().map(|e| (e.address, e.utxo_entry.covenant_id)), covenant_id)
+                .map_err(|e| e.context(format!("the node at {}", self.url)))?;
             found.extend(held);
         }
         Ok(found)

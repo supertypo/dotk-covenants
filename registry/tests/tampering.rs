@@ -3,10 +3,10 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use dotk_covenants::api::{Deed, GenesisBinding, KIND_ACTIVE, KIND_OWNER_UNKNOWN, KIND_PENDING, Manifest, Outpoint, Params, Snapshot};
-use dotk_covenants::compile::{self, Templates};
-use dotk_covenants::verify::{self, REGISTRY_COVENANT_ID};
-use dotk_covenants::{hex, state};
+use dotk_registry::api::{Deed, GenesisBinding, KIND_ACTIVE, KIND_OWNER_UNKNOWN, KIND_PENDING, Manifest, Outpoint, Params, Snapshot};
+use dotk_registry::compile::{self, Templates};
+use dotk_registry::verify::{self, REGISTRY_COVENANT_ID, TESTNET_10};
+use dotk_registry::{hex, state};
 use kaspa_addresses::Address;
 use kaspa_rpc_core::RpcHash;
 
@@ -121,6 +121,15 @@ fn a_tampered_manifest_fails() {
         tamper(&mut m);
         assert!(!proves_deployment(&m), "a changed {what} proved");
     }
+}
+
+#[test]
+fn the_mainnet_deployment_fails_under_another_networks_pin() {
+    let m = manifest();
+    assert!(verify::check_compile_on(&m, &TESTNET_10).is_err(), "a mainnet manifest compiled as testnet-10");
+    let renamed = Manifest { network: TESTNET_10.name.to_string(), ..manifest() };
+    let (t, _) = verify::check_compile_on(&renamed, &TESTNET_10).unwrap();
+    assert!(verify::check_genesis_on(&renamed, &t, &TESTNET_10).is_err(), "the mainnet genesis gave the testnet-10 covenant id");
 }
 
 #[test]

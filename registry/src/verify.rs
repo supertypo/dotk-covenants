@@ -11,8 +11,27 @@ use crate::compile::{self, Template, Templates};
 use crate::hex;
 use crate::state::{self, KEY_MAX, KEY_MIN};
 
-/// Pinned, so an API cannot point the proof at another covenant.
-pub const REGISTRY_COVENANT_ID: &str = "ee2128c03dfac7f6d74734bb3c879bd999434c47a55945b8a6daae2a1e4a21de";
+/// A network and its registry's covenant id, pinned so an API cannot point the proof at another
+/// covenant.
+pub struct Network {
+    pub name: &'static str,
+    pub prefix: Prefix,
+    pub registry_covenant_id: &'static str,
+}
+
+pub const MAINNET: Network = Network {
+    name: "mainnet",
+    prefix: Prefix::Mainnet,
+    registry_covenant_id: "ee2128c03dfac7f6d74734bb3c879bd999434c47a55945b8a6daae2a1e4a21de",
+};
+
+pub const TESTNET_10: Network = Network {
+    name: "testnet-10",
+    prefix: Prefix::Testnet,
+    registry_covenant_id: "4a4ca31ea28508021b899610bbc8fbcec4ebd6e6bf4f9c37dca0339fbda1442c",
+};
+
+pub const REGISTRY_COVENANT_ID: &str = MAINNET.registry_covenant_id;
 
 fn published(abi: &silverscript_abi::SilAbiArtifact, what: &str) -> Result<Template> {
     let mut contracts = abi.contracts.values();
@@ -29,7 +48,11 @@ fn published(abi: &silverscript_abi::SilAbiArtifact, what: &str) -> Result<Templ
 
 /// Step 1: the contracts compile to the published bytecode.
 pub fn check_compile(manifest: &Manifest) -> Result<(Templates, String)> {
-    ensure!(manifest.network == "mainnet", "the API serves a {} deployment, not mainnet", manifest.network);
+    check_compile_on(manifest, &MAINNET)
+}
+
+pub fn check_compile_on(manifest: &Manifest, network: &Network) -> Result<(Templates, String)> {
+    ensure!(manifest.network == network.name, "the API serves a {} deployment, not {}", manifest.network, network.name);
     let t = compile::compile(&manifest.params)?;
     for (what, ours, abi, pinned) in [
         ("DotkGap", &t.gap, &manifest.gap_abi, &manifest.gap_template_hash),
@@ -59,6 +82,11 @@ pub fn check_compile(manifest: &Manifest) -> Result<(Templates, String)> {
 
 /// Step 2: the genesis gap built from the compiled bytecode gives the pinned covenant id.
 pub fn check_genesis(manifest: &Manifest, t: &Templates) -> Result<(RpcHash, String)> {
+    check_genesis_on(manifest, t, &MAINNET)
+}
+
+pub fn check_genesis_on(manifest: &Manifest, t: &Templates, network: &Network) -> Result<(RpcHash, String)> {
+    let pinned = network.registry_covenant_id;
     let binding = &manifest.genesis_binding;
     let spk = t.gap.p2sh_spk(&state::gap_state(&KEY_MIN, &KEY_MAX))?;
     let outpoint = TransactionOutpoint::new(
@@ -67,14 +95,12 @@ pub fn check_genesis(manifest: &Manifest, t: &Templates) -> Result<(RpcHash, Str
     );
     let output = TransactionOutput::new(manifest.params.gap_value, ScriptPublicKey::from_vec(0, spk));
     let id = covenant_id(outpoint, [(binding.output_index, &output)].into_iter());
+    ensure!(id.to_string() == pinned, "the genesis gap gives covenant id {id}, but the {} registry's id is {pinned}", network.name);
     ensure!(
-        id.to_string() == REGISTRY_COVENANT_ID,
-        "the genesis gap gives covenant id {id}, but the mainnet registry's id is {REGISTRY_COVENANT_ID}"
-    );
-    ensure!(
-        manifest.registry_covenant_id == REGISTRY_COVENANT_ID,
-        "the API names covenant id {}, but the mainnet registry's id is {REGISTRY_COVENANT_ID}",
-        manifest.registry_covenant_id
+        manifest.registry_covenant_id == pinned,
+        "the API names covenant id {}, but the {} registry's id is {pinned}",
+        manifest.registry_covenant_id,
+        network.name
     );
     let detail = format!(
         "the genesis gap gives the registry's covenant id\n  covenant id {id}\n  genesis outpoint {}:{}",
@@ -84,8 +110,12 @@ pub fn check_genesis(manifest: &Manifest, t: &Templates) -> Result<(RpcHash, Str
 }
 
 fn p2sh_address(template: &Template, state: &[u8]) -> Result<Address> {
+    p2sh_address_on(template, state, Prefix::Mainnet)
+}
+
+pub fn p2sh_address_on(template: &Template, state: &[u8], prefix: Prefix) -> Result<Address> {
     let spk = template.p2sh_spk(state)?;
-    Ok(Address::new(Prefix::Mainnet, Version::ScriptHash, &spk[2..34]))
+    Ok(Address::new(prefix, Version::ScriptHash, &spk[2..34]))
 }
 
 /// The addresses that a snapshot implies: every gap between its keys, and every deed it claims.
